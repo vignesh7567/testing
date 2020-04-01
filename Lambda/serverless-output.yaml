@@ -1,0 +1,292 @@
+AWSTemplateFormatVersion: 2010-09-09
+Transform: AWS::Serverless-2016-10-31
+Description: Building basic cloudformation
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues:
+    - dev
+    - test
+    - prod
+  DBName:
+    Default: pgdb
+    Description: The database name
+    Type: String
+    MinLength: '1'
+    MaxLength: '8'
+    AllowedPattern: '[a-zA-Z][a-zA-Z0-9]*'
+    ConstraintDescription: must begin with a letter and contain only alphanumeric
+      characters.
+  DBUsername:
+    Default: root
+    NoEcho: 'true'
+    Description: The database admin account username
+    Type: String
+    MinLength: '1'
+    MaxLength: '16'
+    AllowedPattern: '[a-zA-Z][a-zA-Z0-9]*'
+    ConstraintDescription: must begin with a letter and contain only alphanumeric
+      characters.
+  DBPassword:
+    Default: root1234
+    NoEcho: 'true'
+    Description: The database admin account password
+    Type: String
+    MinLength: '8'
+  DBClass:
+    Default: db.t2.micro
+    Description: Database instance class
+    Type: String
+    AllowedValues:
+    - db.t2.micro
+    - db.m1.small
+    - db.m1.large
+    - db.m1.xlarge
+    - db.m2.xlarge
+    ConstraintDescription: must select a valid database instance type.
+  DBAllocatedStorage:
+    Default: '5'
+    Description: The size of the database (Gb)
+    Type: Number
+    MinValue: '5'
+    MaxValue: '6144'
+    ConstraintDescription: must be between 5+
+Mappings:
+  VPCConfig:
+    VPC:
+      CIDR: 10.0.0.0/16
+  Subnets:
+    subnetone:
+      CIDR: 10.0.0.0/24
+    subnettwo:
+      CIDR: 10.0.1.0/24
+Resources:
+  RPS3Scripts:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName:
+        Fn::Sub: ${Environment}-s3-cf-scripts
+      VersioningConfiguration:
+        Status: Enabled
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      CidrBlock:
+        Fn::FindInMap:
+        - VPCConfig
+        - VPC
+        - CIDR
+  PrivateSubnetOne:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone:
+        Fn::Select:
+        - 0
+        - Fn::GetAZs:
+            Ref: AWS::Region
+      VpcId:
+        Ref: VPC
+      CidrBlock:
+        Fn::FindInMap:
+        - Subnets
+        - subnetone
+        - CIDR
+  PrivateSubnetTwo:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone:
+        Fn::Select:
+        - 1
+        - Fn::GetAZs:
+            Ref: AWS::Region
+      VpcId:
+        Ref: VPC
+      CidrBlock:
+        Fn::FindInMap:
+        - Subnets
+        - subnettwo
+        - CIDR
+  myDBEC2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Frontend Access
+      VpcId:
+        Ref: VPC
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 5432
+        ToPort: 5432
+        CidrIp: 10.0.0.0/16
+  RPS3:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName:
+        Fn::Sub: ${Environment}-s3-cf
+      VersioningConfiguration:
+        Status: Enabled
+  RPLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: s3://test-s3-cf-scripts/ce1dff3da51bb9b3df95280f6199609c
+      Handler: rpfunction.lambda_handler
+      Runtime: python3.6
+      Policies:
+      - CloudWatchLogsFullAccess
+      - AmazonEC2ContainerServiceforEC2Role
+      - AmazonS3FullAccess
+      - AWSLambdaBasicExecutionRole
+      - AmazonVPCReadOnlyAccess
+      - AWSLambdaVPCAccessExecutionRole
+      VpcConfig:
+        SecurityGroupIds:
+        - Ref: myDBEC2SecurityGroup
+        SubnetIds:
+        - Ref: PrivateSubnetOne
+        - Ref: PrivateSubnetTwo
+      Environment:
+        Variables:
+          Environment:
+            Ref: Environment
+      Events:
+        S3bucketEvent:
+          Type: S3
+          Properties:
+            Bucket:
+              Ref: RPS3
+            Events: s3:ObjectCreated:*
+            Filter:
+              S3Key:
+                Rules:
+                - Name: Prefix
+                  Value: testfolder/
+  myDBParamGroup:
+    Type: AWS::RDS::DBParameterGroup
+    Properties:
+      Description: Database Parameter Group + pg_stat_statements
+      Family: postgres11
+      Parameters:
+        shared_preload_libraries: pg_stat_statements
+  myDBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: DB Private Subnet
+      SubnetIds:
+      - Ref: PrivateSubnetOne
+      - Ref: PrivateSubnetTwo
+  pgDB:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBName:
+        Ref: DBName
+      AllocatedStorage:
+        Ref: DBAllocatedStorage
+      DBInstanceClass:
+        Ref: DBClass
+      Engine: postgres
+      MasterUsername:
+        Ref: DBUsername
+      MasterUserPassword:
+        Ref: DBPassword
+      DBSubnetGroupName:
+        Ref: myDBSubnetGroup
+      DBParameterGroupName:
+        Ref: myDBParamGroup
+      VPCSecurityGroups:
+      - Fn::GetAtt:
+        - myDBEC2SecurityGroup
+        - GroupId
+  User1:
+    Type: AWS::IAM::User
+    Properties:
+      UserName:
+        Fn::Sub: ${Environment}-RL-user1
+  User2:
+    Type: AWS::IAM::User
+    Properties:
+      UserName:
+        Fn::Sub: ${Environment}-RL-user2
+  User1Policy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: root
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Action: s3:ListBucket
+          Resource:
+            Fn::Sub: arn:aws:s3:::${Environment}-s3-cf
+        - Effect: Allow
+          Action:
+          - s3:ListAllMyBuckets
+          - s3:HeadBucket
+          - s3:PutObject
+          - s3:*Tag*
+          Resource: '*'
+      Users:
+      - Ref: User1
+  User2Policy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: root
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Action: s3:ListBucket
+          Resource:
+            Fn::Sub: arn:aws:s3:::${Environment}-s3-cf
+        - Effect: Allow
+          Action:
+          - s3:ListAllMyBuckets
+          - s3:HeadBucket
+          - s3:GetObject
+          Resource: '*'
+      Users:
+      - Ref: User2
+  s3bucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket:
+        Ref: RPS3
+      PolicyDocument:
+        Statement:
+        - Sid: Put Object Permision - User1
+          Action: s3:PutObject
+          Effect: Allow
+          Resource:
+            Fn::Sub: arn:aws:s3:::${RPS3}/testfolder/*
+          Principal:
+            AWS:
+              Fn::GetAtt:
+              - User1
+              - Arn
+        - Sid: Get Object Permision - AgiConverter User
+          Action: s3:GetObject
+          Effect: Allow
+          Resource:
+            Fn::Sub: arn:aws:s3:::${RPS3}/testfolder/*
+          Principal:
+            AWS:
+              Fn::GetAtt:
+              - User2
+              - Arn
+Outputs:
+  JDBCConnectionString:
+    Description: JDBC connection string for database
+    Value:
+      Fn::Join:
+      - ''
+      - - jdbc:postgresql://
+        - Fn::GetAtt:
+          - pgDB
+          - Endpoint.Address
+        - ':'
+        - Fn::GetAtt:
+          - pgDB
+          - Endpoint.Port
+        - /
+        - Ref: DBName

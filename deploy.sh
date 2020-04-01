@@ -1,0 +1,1 @@
+./scripts/DeployLambda.sh $1
